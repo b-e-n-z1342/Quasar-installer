@@ -8,6 +8,9 @@ import shutil
 import platform
 import math
 import datetime
+import fcntl
+import struct
+import select
 from getpass import getpass
 from itertools import cycle
 
@@ -18,24 +21,6 @@ INSTALLER_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Создаем директорию для логов
 os.makedirs(LOG_DIR, exist_ok=True)
-
-# Псевдографические элементы
-H_LINE = '─'
-V_LINE = '│'
-CORNER_TL = '╭'
-CORNER_TR = '╮'
-CORNER_BL = '╰'
-CORNER_BR = '╯'
-T_UP = '╧'
-T_DOWN = '╤'
-T_LEFT = '╢'
-T_RIGHT = '╟'
-CROSS = '┼'
-ARROW_RIGHT = '▶'
-ARROW_LEFT = '◀'
-
-# Анимация спиннера
-SPINNER = cycle(['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'])
 
 # --- ФУНКЦИИ ЛОГИРОВАНИЯ ---
 def log_init():
@@ -61,65 +46,138 @@ def log_command(cmd, output, error=None):
     if error:
         log_message(f"ERROR: {error}")
 
+# --- УТИЛИТЫ ТЕРМИНАЛА ---
+def get_terminal_size():
+    """Получаем размер терминала"""
+    try:
+        h, w, _, _ = struct.unpack('HHHH', 
+            fcntl.ioctl(0, termios.TIOCGWINSZ, 
+            struct.pack('HHHH', 0, 0, 0, 0)))
+        return w, h
+    except:
+        return 80, 24  # Стандартный размер
+
+# --- ПРОГРЕСС-БАРЫ ---
+class ProgressBar:
+    def __init__(self, total, description="", width=50):
+        self.total = total
+        self.description = description
+        self.width = width
+        self.current = 0
+        self.start_time = time.time()
+        
+    def update(self, value):
+        """Обновляем прогресс"""
+        self.current = value
+        self.draw()
+        
+    def increment(self, delta=1):
+        """Увеличиваем прогресс"""
+        self.current += delta
+        self.draw()
+        
+    def draw(self):
+        """Рисуем прогресс-бар"""
+        percent = self.current / self.total
+        filled = int(self.width * percent)
+        bar = '█' * filled + '-' * (self.width - filled)
+        elapsed = time.time() - self.start_time
+        
+        # Расчет оставшегося времени
+        if percent > 0:
+            remaining = (elapsed / percent) * (1 - percent)
+            time_str = f"{remaining:.1f}s"
+        else:
+            time_str = "???"
+            
+        # Центрирование
+        term_width, _ = get_terminal_size()
+        desc_width = term_width - self.width - 20
+        desc = (self.description[:desc_width] + '..') if len(self.description) > desc_width else self.description
+        
+        # Форматированная строка
+        progress_str = f"\r{desc.ljust(desc_width)} |{bar}| {percent*100:.1f}% [{self.current}/{self.total}] ⏱{time_str}"
+        sys.stdout.write(progress_str)
+        sys.stdout.flush()
+        
+    def complete(self):
+        """Завершаем прогресс-бар"""
+        self.update(self.total)
+        print()
+
 # --- ИНТЕРФЕЙСНЫЕ ФУНКЦИИ ---
 def clear_screen():
     os.system('clear')
 
-def center_text(text, width=80):
-    """Центрирует текст с учётом границ"""
-    padding = (width - len(text)) // 2
-    return ' ' * max(0, padding) + text
-
-def draw_box(title, width=80, content=None, footer=None):
+def draw_box(title, content=None, footer=None):
     """Рисует красивый центрированный блок"""
+    term_width, _ = get_terminal_size()
+    width = min(term_width - 4, 100)
+    
     # Верхняя граница
-    box = CORNER_TL + H_LINE * (width - 2) + CORNER_TR + '\n'
+    box = "┌" + "─" * (width - 2) + "┐\n"
     
-    # Заголовок (центрированный)
-    title_line = V_LINE + center_text(title, width - 2) + V_LINE + '\n'
+    # Заголовок
+    title_line = "│" + title.center(width - 2) + "│\n"
     box += title_line
-    box += T_RIGHT + H_LINE * (width - 2) + T_LEFT + '\n'
+    box += "├" + "─" * (width - 2) + "┤\n"
     
-    # Контент (центрированный)
+    # Контент
     if content:
+        if isinstance(content, str):
+            content = [content]
+            
         for line in content:
-            centered = center_text(line, width - 4)
-            box += V_LINE + ' ' + centered + ' ' + V_LINE + '\n'
+            if len(line) > width - 4:
+                # Перенос длинных строк
+                parts = [line[i:i+width-4] for i in range(0, len(line), width-4)]
+                for part in parts:
+                    box += "│ " + part.ljust(width - 4) + " │\n"
+            else:
+                box += "│ " + line.ljust(width - 4) + " │\n"
     
     # Нижняя граница
     if footer:
-        box += T_RIGHT + H_LINE * (width - 2) + T_LEFT + '\n'
-        footer_line = V_LINE + center_text(footer, width - 2) + V_LINE + '\n'
-        box += footer_line
+        box += "├" + "─" * (width - 2) + "┤\n"
+        if len(footer) > width - 4:
+            footer_parts = [footer[i:i+width-4] for i in range(0, len(footer), width-4)]
+            for part in footer_parts:
+                box += "│ " + part.center(width - 4) + " │\n"
+        else:
+            box += "│ " + footer.center(width - 4) + " │\n"
     
-    box += CORNER_BL + H_LINE * (width - 2) + CORNER_BR
+    box += "└" + "─" * (width - 2) + "┘"
     return box
 
 def print_header():
     clear_screen()
+    term_width, _ = get_terminal_size()
+    width = min(term_width - 4, 100)
+    
     header = f"""
-{CORNER_TL}{H_LINE * 78}{CORNER_TR}
-{V_LINE}{' ' * 78}{V_LINE}
-{V_LINE}{center_text('██████╗ ██╗   ██╗ █████╗ ███████╗ █████╗ ██████╗', 78)}{V_LINE}
-{V_LINE}{center_text('██╔═══██╗██║   ██║██╔══██╗██╔════╝██╔══██╗██╔══██╗', 78)}{V_LINE}
-{V_LINE}{center_text('██║   ██║██║   ██║███████║███████╗███████║██████╔╝', 78)}{V_LINE}
-{V_LINE}{center_text('██║▄▄ ██║██║   ██║██╔══██║╚════██║██╔══██║██╔══██╗', 78)}{V_LINE}
-{V_LINE}{center_text('╚██████╔╝╚██████╔╝██║  ██║███████║██║  ██║██║  ██║', 78)}{V_LINE}
-{V_LINE}{center_text(' ╚══▀▀═╝  ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝', 78)}{V_LINE}
-{V_LINE}{' ' * 78}{V_LINE}
-{CORNER_BL}{H_LINE * 78}{CORNER_BR}
+┌{"─" * (width - 2)}┐
+│{" " * (width - 2)}│
+│{"Quasar Linux Installer".center(width - 2)}│
+│{" " * (width - 2)}│
+│{"██████╗ ██╗   ██╗ █████╗ ███████╗ █████╗ ██████╗".center(width - 2)}│
+│{"██╔═══██╗██║   ██║██╔══██╗██╔════╝██╔══██╗██╔══██╗".center(width - 2)}│
+│{"██║   ██║██║   ██║███████║███████╗███████║██████╔╝".center(width - 2)}│
+│{"██║▄▄ ██║██║   ██║██╔══██║╚════██║██╔══██║██╔══██╗".center(width - 2)}│
+│{"╚██████╔╝╚██████╔╝██║  ██║███████║██║  ██║██║  ██║".center(width - 2)}│
+│{" ╚══▀▀═╝  ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝".center(width - 2)}│
+│{" " * (width - 2)}│
+└{"─" * (width - 2)}┘
 """
     print(header)
     log_message("Displayed main header")
 
 # --- СИСТЕМНЫЕ ФУНКЦИИ ---
-def run_command(cmd, exit_on_error=True, show_progress=False):
+def run_command(cmd, exit_on_error=True, show_progress=False, progress_desc=""):
     """Выполняет команду с возможным отображением прогресса"""
     log_message(f"Executing: {cmd}")
     try:
         if show_progress:
-            # Создаем анимированный прогресс
-            print(center_text(f"{next(SPINNER)} Выполнение: {cmd}", 80))
+            print(f"\n{progress_desc}")
             
             process = subprocess.Popen(
                 cmd, 
@@ -129,29 +187,25 @@ def run_command(cmd, exit_on_error=True, show_progress=False):
                 text=True
             )
             
-            # Анимация выполнения
-            output_lines = []
-            while process.poll() is None:
-                line = process.stdout.readline()
-                if line:
-                    output_lines.append(line.strip())
-                    print(f"\r{next(SPINNER)}", end='', flush=True)
-                time.sleep(0.1)
-            
-            # Получаем оставшийся вывод
-            remaining = process.stdout.read()
-            if remaining:
-                output_lines.append(remaining.strip())
-            
-            output = "\n".join(output_lines)
+            # Читаем вывод построчно
+            while True:
+                output_line = process.stdout.readline()
+                if output_line == '' and process.poll() is not None:
+                    break
+                if output_line:
+                    print(f"  {output_line.strip()}")
+                
+            # Обрабатываем ошибки
             error = process.stderr.read()
+            if error:
+                log_message(f"Command error: {error}")
+                print(f"  ERROR: {error.strip()}")
             
-            print("\r✓", end='', flush=True)
-            time.sleep(0.3)
-            print("\n")
-            
-            log_command(cmd, output, error)
-            return output
+            returncode = process.poll()
+            if returncode != 0:
+                raise subprocess.CalledProcessError(returncode, cmd)
+                
+            return ""
         else:
             result = subprocess.run(
                 cmd, 
@@ -175,12 +229,18 @@ def run_command(cmd, exit_on_error=True, show_progress=False):
             sys.exit(1)
         return None
 
-def progress_bar(iteration, total, length=50):
-    """Отображает текстовый прогресс-бар"""
-    percent = ("{0:.1f}").format(100 * (iteration / float(total)))
-    filled_length = int(length * iteration // total)
-    bar = '█' * filled_length + '-' * (length - filled_length)
-    return f"|{bar}| {percent}%"
+def install_packages(packages, desc="Установка пакетов"):
+    """Устанавливает пакеты с прогресс-баром"""
+    print(f"\n{desc}:")
+    total = len(packages)
+    progress = ProgressBar(total, desc, width=40)
+    
+    for i, pkg in enumerate(packages):
+        progress.update(i)
+        run_command(f"pacman -S --noconfirm {pkg}", show_progress=False)
+        time.sleep(0.1)  # Для плавности прогресса
+        
+    progress.complete()
 
 def check_disk_type(disk):
     """Определяет тип диска (SSD/HDD) и выдает предупреждение"""
@@ -217,24 +277,19 @@ def select_disk(disks):
     """Отображает меню выбора диска"""
     while True:
         print_header()
-        content = [
-            f"{d['name']:6} {d['size']:8} {d['model'][:40]:40} {d['type']}" 
-            for d in disks
-        ]
-        print(draw_box("ДОСТУПНЫЕ ДИСКИ", width=80, content=content))
+        content = [f"{d['name']:6} {d['size']:8} {d['model'][:40]:40} {d['type']}" for d in disks]
+        print(draw_box("ДОСТУПНЫЕ ДИСКИ", content=content))
         
-        choice = input("\n" + center_text("Введите имя диска (например, sda, nvme0n1): ", 80)).strip()
+        choice = input("\nВведите имя диска (например, sda, nvme0n1): ").strip()
         disk_path = f"/dev/{choice}"
         
         if os.path.exists(disk_path):
-            # Проверяем тип диска
             disk_type = check_disk_type(disk_path)
             log_message(f"Selected disk: {disk_path} ({disk_type})")
             if "HDD" in disk_type:
                 print_header()
                 print(draw_box(
                     "ВНИМАНИЕ: МЕДЛЕННЫЙ ДИСК", 
-                    width=80, 
                     content=[
                         "Обнаружен механический жесткий диск (HDD)!",
                         "Производительность системы будет ОЧЕНЬ НИЗКОЙ!",
@@ -245,12 +300,12 @@ def select_disk(disks):
                     footer="Введите 'y' для подтверждения или 'n' для отмены"
                 ))
                 
-                confirm = input(center_text("Ваш выбор (y/N): ", 80)).strip().lower()
+                confirm = input("Ваш выбор (y/N): ").strip().lower()
                 if confirm != 'y':
                     continue
             return disk_path
         else:
-            print(center_text(f"Диск {disk_path} не существует!", 80))
+            print(f"Диск {disk_path} не существует!")
             log_message(f"Invalid disk selected: {disk_path}")
             time.sleep(2)
 
@@ -259,7 +314,6 @@ def partition_disk(disk):
     print_header()
     print(draw_box(
         "РАЗМЕТКА ДИСКА", 
-        width=80, 
         content=[
             f"Будет запущен cfdisk для диска: {disk}",
             "",
@@ -277,11 +331,11 @@ def partition_disk(disk):
     
     # Показываем результат разметки
     print_header()
-    print(center_text("РЕЗУЛЬТАТ РАЗМЕТКИ", 80))
+    print("РЕЗУЛЬТАТ РАЗМЕТКИ:")
     partition_info = run_command(f"fdisk -l {disk} | grep '^/'")
     print(partition_info)
     log_message(f"Partition info:\n{partition_info}")
-    print("\n" + center_text("Разметка завершена. Нажмите Enter для продолжения...", 80))
+    print("\nРазметка завершена. Нажмите Enter для продолжения...")
     input()
 
 def format_partitions(uefi_mode, root_part, boot_part):
@@ -289,7 +343,6 @@ def format_partitions(uefi_mode, root_part, boot_part):
     print_header()
     print(draw_box(
         "ФОРМАТИРОВАНИЕ РАЗДЕЛОВ", 
-        width=80, 
         content=[
             f"Корневой раздел: {root_part} -> ext4",
             f"Загрузочный раздел: {boot_part} -> {'FAT32' if uefi_mode else 'ext4'}",
@@ -298,15 +351,15 @@ def format_partitions(uefi_mode, root_part, boot_part):
         ]
     ))
     
-    # Форматирование с прогрессом
+    # Форматирование
     if uefi_mode:
-        run_command(f"mkfs.fat -F32 {boot_part}", show_progress=True)
+        run_command(f"mkfs.fat -F32 {boot_part}", progress_desc="Форматирование EFI раздела")
     else:
-        run_command(f"mkfs.ext4 -F {boot_part}", show_progress=True)
+        run_command(f"mkfs.ext4 -F {boot_part}", progress_desc="Форматирование BOOT раздела")
     
-    run_command(f"mkfs.ext4 -F {root_part}", show_progress=True)
+    run_command(f"mkfs.ext4 -F {root_part}", progress_desc="Форматирование ROOT раздела")
     
-    print(center_text("✓ Форматирование завершено!", 80))
+    print("✓ Форматирование завершено!")
     time.sleep(1)
     log_message("Partitions formatted successfully")
 
@@ -315,7 +368,6 @@ def mount_partitions(uefi_mode, root_part, boot_part):
     print_header()
     print(draw_box(
         "МОНТИРОВАНИЕ РАЗДЕЛОВ", 
-        width=80, 
         content=[
             f"Монтирование корневого раздела: {root_part} -> /mnt",
             f"Монтирование загрузочного раздела: {boot_part} -> {'/mnt/boot/efi' if uefi_mode else '/mnt/boot'}",
@@ -324,16 +376,16 @@ def mount_partitions(uefi_mode, root_part, boot_part):
         ]
     ))
     
-    run_command(f"mount {root_part} /mnt", show_progress=True)
+    run_command(f"mount {root_part} /mnt", progress_desc="Монтирование корневого раздела")
     
     if uefi_mode:
         os.makedirs("/mnt/boot/efi", exist_ok=True)
-        run_command(f"mount {boot_part} /mnt/boot/efi", show_progress=True)
+        run_command(f"mount {boot_part} /mnt/boot/efi", progress_desc="Монтирование EFI раздела")
     else:
         os.makedirs("/mnt/boot", exist_ok=True)
-        run_command(f"mount {boot_part} /mnt/boot", show_progress=True)
+        run_command(f"mount {boot_part} /mnt/boot", progress_desc="Монтирование BOOT раздела")
     
-    print(center_text("✓ Монтирование завершено!", 80))
+    print("✓ Монтирование завершено!")
     time.sleep(1)
     log_message("Partitions mounted successfully")
 
@@ -344,7 +396,6 @@ def set_password(username, is_root=False):
         prompt = f"Установка пароля для {'ROOT' if is_root else username}"
         print(draw_box(
             prompt,
-            width=60,
             content=[
                 "Введите пароль:",
                 "(пароль не будет отображаться при вводе)"
@@ -355,7 +406,6 @@ def set_password(username, is_root=False):
         
         print(draw_box(
             prompt,
-            width=60,
             content=[
                 "Повторите пароль:",
                 "(для подтверждения)"
@@ -365,13 +415,13 @@ def set_password(username, is_root=False):
         
         if password1 == password2:
             if is_root:
-                run_command(f"echo 'root:{password1}' | artix-chroot /mnt chpasswd", show_progress=True)
+                run_command(f"echo 'root:{password1}' | artix-chroot /mnt chpasswd")
             else:
-                run_command(f"echo '{username}:{password1}' | artix-chroot /mnt chpasswd", show_progress=True)
+                run_command(f"echo '{username}:{password1}' | artix-chroot /mnt chpasswd")
             log_message(f"Password set for {'root' if is_root else username}")
             return
         else:
-            print(center_text("Пароли не совпадают! Попробуйте снова.", 80))
+            print("Пароли не совпадают! Попробуйте снова.")
             time.sleep(2)
 
 def install_base_system(username, uefi_mode, disk, boot_part):
@@ -386,27 +436,26 @@ def install_base_system(username, uefi_mode, disk, boot_part):
         "grub os-prober efibootmgr networkmanager-runit fish mc htop",
         "wget curl git iwd terminus-font"
     ]
-    print(draw_box("УСТАНОВКА СИСТЕМЫ", width=90, content=content))
+    print(draw_box("УСТАНОВКА СИСТЕМЫ", content=content))
     
     # Установка пакетов с прогресс-баром
-    packages = " ".join([
+    packages = [
         "base", "base-devel", "runit", "dbus-runit", "elogind-runit",
         "dhcpcd", "linux-zen", "plasma-nm", "linux-zen-headers", "dkms", "dbus", "sudo",
         "grub", "os-prober", "efibootmgr", "networkmanager-runit", "fish", "mc", "htop",
         "wget", "curl", "git", "iwd", "terminus-font"
-    ])
+    ]
     
-    print(center_text("Идет установка пакетов...", 80))
-    run_command(f"basestrap /mnt {packages}", show_progress=True)
+    install_packages(packages, "Установка системных пакетов")
     
     # Настройка fstab
-    print(center_text("Генерация fstab...", 80))
-    run_command("fstabgen -U /mnt >> /mnt/etc/fstab", show_progress=True)
-    run_command("cp /etc/pacman.conf /mnt/etc/", show_progress=True)
+    print("Генерация fstab...")
+    run_command("fstabgen -U /mnt >> /mnt/etc/fstab", progress_desc="Создание fstab")
+    run_command("cp /etc/pacman.conf /mnt/etc/", progress_desc="Копирование pacman.conf")
     
     # Создание пользователя
-    print(center_text(f"Создание пользователя {username}...", 80))
-    run_command(f"artix-chroot /mnt useradd -m -G wheel -s /bin/bash {username}", show_progress=True)
+    print(f"Создание пользователя {username}...")
+    run_command(f"artix-chroot /mnt useradd -m -G wheel -s /bin/bash {username}", progress_desc="Создание пользователя")
     run_command(f"artix-chroot /mnt usermod -aG audio,video,input,storage,optical,lp,scanner {username}")
     
     # Установка паролей
@@ -414,7 +463,7 @@ def install_base_system(username, uefi_mode, disk, boot_part):
     set_password(username, is_root=True)
     
     # Копирование файлов
-    print(center_text("Копирование системных файлов...", 80))
+    print("Копирование системных файлов...")
     try:
         # Копируем из директории установщика
         shutil.copytree(os.path.join(INSTALLER_DIR, "pixmap"), 
@@ -438,7 +487,7 @@ def install_base_system(username, uefi_mode, disk, boot_part):
             log_message("Copied systemctl to /mnt/usr/local/bin/")
     except Exception as e:
         log_message(f"Error copying files: {str(e)}")
-        print(center_text(f"Ошибка копирования файлов: {e}", 80))
+        print(f"Ошибка копирования файлов: {e}")
         time.sleep(2)
     
     # Настройка chroot
@@ -448,7 +497,6 @@ def install_base_system(username, uefi_mode, disk, boot_part):
     print_header()
     print(draw_box(
         "УСТАНОВКА ЗАВЕРШЕНА", 
-        width=80, 
         content=[
             "Базовая система успешно установлена!",
             "",
@@ -498,15 +546,35 @@ HOME_URL="https://b-e-n-z1342.github.io"
 LOGO=quasar-logo
 EOF
 
-# Загрузчик GRUB
+# Установка загрузчика GRUB с проверкой
 if [ {uefi_mode} -eq 1 ]; then
+    echo "Установка GRUB для UEFI..."
+    # Создаем каталог для GRUB
+    mkdir -p /boot/efi/EFI/GRUB
+    
+    # Устанавливаем GRUB
     grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck
-else:
+    
+    # Проверка установки
+    if [ ! -f /boot/efi/EFI/GRUB/grubx64.efi ]; then
+        echo "ОШИБКА: GRUB не установился!"
+        exit 1
+    fi
+else
+    echo "Установка GRUB для BIOS..."
     grub-install --target=i386-pc {disk} --recheck
 fi
 
+# Генерация конфигурации GRUB
+echo "Генерация конфига GRUB..."
 sed -i 's/GRUB_DISTRIBUTOR=.*/GRUB_DISTRIBUTOR="Quasar Linux"/' /etc/default/grub
 grub-mkconfig -o /boot/grub/grub.cfg
+
+# Проверка конфигурации
+if [ ! -f /boot/grub/grub.cfg ]; then
+    echo "ОШИБКА: Конфиг GRUB не создан!"
+    exit 1
+fi
 
 # Активация сервисов runit
 ln -sf /etc/runit/sv/dbus /run/runit/service/
@@ -528,8 +596,8 @@ EOF
         f.write(chroot_script)
     
     os.chmod("/mnt/chroot_setup.sh", 0o755)
-    print(center_text("Настройка chroot-окружения...", 80))
-    run_command("artix-chroot /mnt /chroot_setup.sh", show_progress=True)
+    print("Настройка chroot-окружения...")
+    run_command("artix-chroot /mnt /chroot_setup.sh", progress_desc="Выполнение chroot-скрипта")
     os.remove("/mnt/chroot_setup.sh")
     log_message("Chroot setup completed")
 
@@ -539,7 +607,7 @@ def main():
     
     # Проверка прав
     if os.geteuid() != 0:
-        print(center_text("Этот скрипт должен запускаться с правами root!", 80))
+        print("Этот скрипт должен запускаться с правами root!")
         log_message("Script started without root privileges!")
         sys.exit(1)
     
@@ -551,13 +619,12 @@ def main():
     log_message(f"Boot mode detected: {boot_mode}")
     
     # Установка шрифта
-    run_command("pacman -Sy terminus-font --noconfirm", show_progress=True)
+    run_command("pacman -Sy terminus-font --noconfirm", progress_desc="Установка шрифтов")
     run_command("setfont ter-v20n")
     
     print_header()
     print(draw_box(
         "РЕЖИМ ЗАГРУЗКИ", 
-        width=60, 
         content=[f"Обнаружен режим загрузки: {boot_mode}"],
         footer="Нажмите Enter для продолжения..."
     ))
@@ -572,14 +639,14 @@ def main():
     
     # Выбор разделов
     print_header()
-    print(center_text("СПИСОК РАЗДЕЛОВ", 80))
+    print("СПИСОК РАЗДЕЛОВ:")
     partition_info = run_command(f"fdisk -l {disk} | grep '^/'")
     print(partition_info)
     log_message(f"Partition info:\n{partition_info}")
     
     print("\n")
-    root_part = input(center_text("Введите раздел для ROOT (например, /dev/sda2): ", 80)).strip()
-    boot_part = input(center_text("Введите раздел для BOOT/EFI (например, /dev/sda1): ", 80)).strip()
+    root_part = input("Введите раздел для ROOT (например, /dev/sda2): ").strip()
+    boot_part = input("Введите раздел для BOOT/EFI (например, /dev/sda1): ").strip()
     log_message(f"Selected partitions: ROOT={root_part}, BOOT/EFI={boot_part}")
     
     # Форматирование
@@ -590,16 +657,16 @@ def main():
     
     # Создание пользователя
     print_header()
-    username = input(center_text("Введите имя нового пользователя: ", 80)).strip()
+    username = input("Введите имя нового пользователя: ").strip()
     log_message(f"Creating user: {username}")
     
     # Установка системы
     install_base_system(username, uefi_mode, disk, boot_part)
     
     # Очистка
-    print(center_text("Завершение установки...", 80))
-    run_command("umount -R /mnt", exit_on_error=False, show_progress=True)
-    print(center_text("✓ Установка завершена! Перезагрузите систему.", 80))
+    print("Завершение установки...")
+    run_command("umount -R /mnt", exit_on_error=False, progress_desc="Размонтирование разделов")
+    print("✓ Установка завершена! Перезагрузите систему.")
     log_message("Installation completed successfully")
 
 if __name__ == "__main__":
