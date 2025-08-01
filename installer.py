@@ -450,9 +450,20 @@ def install_base_system(username, uefi_mode, disk, boot_part):
     
     # Настройка fstab
     print("Генерация fstab...")
-    run_command("fstabgen -U /mnt >> /mnt/etc/fstab", progress_desc="Создание fstab")
-    run_command("cp /etc/pacman.conf /mnt/etc/", progress_desc="Копирование pacman.conf")
-    
+    def generate_fstab():
+        try:
+            os.makedirs("/mnt/etc", exist_ok=True)
+            result = subprocess.run(["fstabgen", "-U", "/mnt"], capture_output=True, text=True)
+            if result.returncode == 0:
+                with open("/mnt/etc/fstab", "w") as f:
+                    f.write(result.stdout)
+                log_message("fstab сгенерирован и записан.")
+            else:
+                log_command("fstabgen -U /mnt", result.stdout, result.stderr)
+                log_message("Ошибка генерации fstab")
+        except Exception as e:
+        log_message(f"Исключение при генерации fstab: {str(e)}")
+ 
     # Создание пользователя
     print(f"Создание пользователя {username}...")
     run_command(f"artix-chroot /mnt useradd -m -G wheel -s /bin/bash {username}", progress_desc="Создание пользователя")
